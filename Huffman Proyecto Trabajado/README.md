@@ -1,8 +1,10 @@
 Encriptador de Empresas S&P 500 y ETFs usando Huffman
+
 Descripción General
 Aplicación de escritorio en Python que implementa el algoritmo de codificación de Huffman para comprimir y "encriptar" datos de empresas del S&P 500 y ETFs. Permite cargar archivos CSV, aplicar compresión Huffman, exportar a formato propietario .papus autocontenible, desencriptar con contraseña y visualizar análisis sectorial.
 
 Características Principales
+
 ✅ Compresión Huffman: Reduce archivos CSV ~30-40%
 ✅ Formato .papus Autocontenible: No requiere archivo original para desencriptar
 ✅ Detección Automática de Columnas: Soporta múltiples formatos de ETF
@@ -11,10 +13,6 @@ Características Principales
 ✅ Análisis Visual: Gráficas Matplotlib de distribución sectorial
 ✅ Multi-ETF: Compatible con S&P 500, NASDAQ-100, Russell 2000, etc.
 
-Requisitos del Sistema
-Python: 3.6 o superior
-
-Sistema Operativo: Windows, macOS, Linux
 
 Librerías: Ver requirements.txt
 
@@ -74,19 +72,7 @@ Se abrirá una gráfica con análisis de distribución sectorial
 
 Se mostrará resumen textual debajo de la GUI
 
-Estructura del Proyecto
-text
-encriptador-huffman-sp500/
-├── encriptador_sp500.py          # Script principal
-├── requirements.txt              # Dependencias
-├── README.md                     # Este archivo
-├── datos/
-│   ├── sp500.csv                # Ejemplo: S&P 500
-│   ├── nasdaq100.csv            # Ejemplo: NASDAQ 100
-│   └── russell2000.csv          # Ejemplo: Russell 2000
-└── salida/
-    ├── datos_encriptados.papus  # Archivos generados
-    └── datos_recuperados.csv
+
 Formato del Archivo .papus
 text
 PAPUSCRYPT
