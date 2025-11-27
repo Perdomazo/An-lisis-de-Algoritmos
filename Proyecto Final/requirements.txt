@@ -1,0 +1,7 @@
+customtkinter
+pandas
+numpy
+yfinance
+matplotlib
+networkx
+scipy
