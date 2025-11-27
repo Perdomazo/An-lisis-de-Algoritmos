@@ -1,0 +1,851 @@
+import customtkinter as ctk
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import networkx as nx
+import threading
+import time
+
+
+# ----------- UTILIDADES GENERALES ----------- #
+# Funciones auxiliares para descargar precios y calcular rendimientos
+
+
+def descargar_precios_cierre(tickers, periodo="2y"):
+    """Descarga precios de cierre históricos desde Yahoo Finance"""
+    tickers_yf = [t.replace(".", "-") for t in tickers]
+    df = yf.download(tickers_yf, period=periodo, interval="1d", progress=False)['Close']
+    return df
+
+
+def calcular_rendimientos(precios_df):
+    """Calcula rendimientos porcentuales diarios"""
+    return precios_df.pct_change(fill_method=None).dropna()
+
+
+# ----------- MODULO FUERZA BRUTA ----------- #
+# Este módulo encuentra la asignación óptima de pesos en un portafolio
+# probando todas las combinaciones posibles y seleccionando la de mayor Sharpe Ratio
+
+
+class FuerzaBrutaFrame(ctk.CTkFrame):
+    def __init__(self, master):
+        super().__init__(master)
+        self.configure(corner_radius=8)
+        self.grid_rowconfigure(0, weight=0)
+        self.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(self, text="Optimización de Portafolio (Fuerza Bruta Sharpe Simplificado)", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(12, 10))
+        self.info_lab = ctk.CTkLabel(self, text="Simula todas las combinaciones posibles de pesos entre 1 y 5 activos para encontrar la mezcla con mejor relación rendimiento/riesgo (Sharpe simplificado). Ideal para entender cómo cambian el riesgo y el retorno según la distribución del dinero.", wraplength=420)
+        self.info_lab.pack(pady=(0, 12))
+
+        form = ctk.CTkFrame(self)
+        form.pack(padx=12, pady=(0,8))
+
+        self.var_activos = tk.IntVar(value=3)
+        self.var_pasos = tk.IntVar(value=10)
+        self.var_rf = tk.DoubleVar(value=0.02)
+
+        ctk.CTkLabel(form, text="Número de activos (1-5):").grid(row=0, column=0, sticky="w")
+        ctk.CTkComboBox(form, values=[str(i) for i in range(1,6)], variable=self.var_activos, width=60, command=self._setup_activos).grid(row=0, column=1, padx=4)
+        ctk.CTkLabel(form, text="Pasos de discretización (5-20):").grid(row=0, column=2, sticky="w")
+        ctk.CTkComboBox(form, values=[str(i) for i in range(5,21)], variable=self.var_pasos, width=60).grid(row=0, column=3, padx=4)
+        ctk.CTkLabel(form, text="Tasa libre de riesgo (Rf):").grid(row=0, column=4, sticky="w")
+        ctk.CTkEntry(form, textvariable=self.var_rf, width=60).grid(row=0, column=5, padx=4)
+
+        self.entries = []
+        self._setup_activos("3")
+
+        ctk.CTkButton(self, text="Optimizar", command=self.run_fuerza_bruta).pack(pady=(8, 4))
+        self.res_out = ctk.CTkTextbox(self, height=125, width=465, wrap="word")
+        self.res_out.pack(padx=16, pady=(10, 12))
+
+    def _setup_activos(self, value):
+        for sub in getattr(self, "entries", []):
+            sub[0].destroy(); sub[1].destroy(); sub[2].destroy(); sub[3].destroy()
+        self.entries = []
+        activos = int(self.var_activos.get())
+        for i in range(activos):
+            lab_r = ctk.CTkLabel(self, text=f"Activo {i+1} - Rendimiento esperado [-1,1]:")
+            inp_r = ctk.CTkEntry(self, width=60)
+            lab_v = ctk.CTkLabel(self, text="Volatilidad [0,1):")
+            inp_v = ctk.CTkEntry(self, width=60)
+            lab_r.pack()
+            inp_r.pack()
+            lab_v.pack()
+            inp_v.pack()
+            self.entries.append((lab_r, inp_r, lab_v, inp_v))
+
+    def run_fuerza_bruta(self):
+        try:
+            activos = int(self.var_activos.get())
+            pasos = int(self.var_pasos.get())
+            rf = float(self.var_rf.get())
+            rendimiento = []
+            volatilidad = []
+            for lab_r, inp_r, lab_v, inp_v in self.entries:
+                r = float(inp_r.get())
+                v = float(inp_v.get())
+                if not -1.0 <= r <= 1.0:
+                    raise ValueError("Rendimientos fuera de rango.")
+                if not 0.0 <= v < 1.0:
+                    raise ValueError("Volatilidades fuera de rango.")
+                rendimiento.append(r)
+                volatilidad.append(v)
+        except Exception:
+            self.res_out.delete("1.0", tk.END)
+            self.res_out.insert("end", "Por favor revisa todos los campos y usa valores válidos.\n")
+            return
+
+        unidades = int(100 / pasos)
+        total_unidades = unidades
+
+        mejor_sharpe = float("-inf")
+        mejor_pesos = mejor_r = mejor_sigma = None
+
+        def evaluar(k_vec):
+            nonlocal mejor_sharpe, mejor_pesos, mejor_r, mejor_sigma
+            pesos = [k / unidades for k in k_vec]
+            r_port = sum(p * r for p, r in zip(pesos, rendimiento))
+            sigma_port = sum(p * v for p, v in zip(pesos, volatilidad))
+            if sigma_port <= 0:
+                return
+            sharpe = (r_port - rf) / sigma_port
+            if sharpe > mejor_sharpe:
+                mejor_sharpe = sharpe
+                mejor_pesos = pesos[:]
+                mejor_r = r_port
+                mejor_sigma = sigma_port
+
+        # Combinaciones de fuerza bruta
+        if activos == 1:
+            for a in range(total_unidades + 1):
+                if a == total_unidades:
+                    evaluar([a])
+        elif activos == 2:
+            for a in range(total_unidades + 1):
+                b = total_unidades - a
+                evaluar([a, b])
+        elif activos == 3:
+            for a in range(total_unidades + 1):
+                for b in range(total_unidades - a + 1):
+                    c = total_unidades - a - b
+                    evaluar([a, b, c])
+        elif activos == 4:
+            for a in range(total_unidades + 1):
+                for b in range(total_unidades - a + 1):
+                    for c in range(total_unidades - a - b + 1):
+                        d = total_unidades - a - b - c
+                        evaluar([a, b, c, d])
+        elif activos == 5:
+            for a in range(total_unidades + 1):
+                for b in range(total_unidades - a + 1):
+                    for c in range(total_unidades - a - b + 1):
+                        for d in range(total_unidades - a - b - c + 1):
+                            e = total_unidades - a - b - c - d
+                            evaluar([a, b, c, d, e])
+
+        self.res_out.delete("1.0", tk.END)
+        if mejor_pesos is None:
+            self.res_out.insert("end", "No se obtuvo combinación válida. Checa tus entradas.\n")
+        else:
+            pesos_str = ", ".join(f"{w:.2f}" for w in mejor_pesos)
+            result = (
+                "=== RESULTADO (Fuerza Bruta - Sharpe simplificado) ===\n"
+                f"Mejores pesos por activo (en orden): [{pesos_str}]\n"
+                f"Rendimiento cartera (Rp): {mejor_r:.4f}\n"
+                f"Volatilidad aprox: {mejor_sigma:.4f}\n"
+                f"Sharpe: {(mejor_r - rf) / mejor_sigma:.4f}\n"
+                f"Tasa libre de riesgo (Rf): {rf:.4f}\n"
+            )
+            self.res_out.insert("end", result)
+
+
+# ----------- MODULO DV/DP (MEJOR EMPRESA) ----------- #
+# Este módulo compara dos algoritmos para encontrar la mejor empresa:
+# - Divide y Vencerás: divide recursivamente la lista y compara
+# - Programación Dinámica: itera secuencialmente comparando cada elemento
+
+
+def calcular_metricas(ticker, tasa_libre_riesgo=0.05, periodo='1y'):
+    """Calcula métricas financieras (rendimiento, volatilidad, Sharpe) de un ticker"""
+    try:
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period=periodo)
+        if len(hist) < 2:
+            return None
+        hist['log_return'] = np.log(hist['Close'] / hist['Close'].shift(1))
+        returns = hist['log_return'].dropna()
+        ret_total = (hist['Close'].iloc[-1]/hist['Close'].iloc[0]) - 1
+        n_days = len(hist)
+        rendimiento_anual = (1 + ret_total) ** (252 / n_days) - 1
+        volatilidad_anual = returns.std() * np.sqrt(252)
+        exceso_retorno = rendimiento_anual - tasa_libre_riesgo
+        sharpe = exceso_retorno / volatilidad_anual if volatilidad_anual > 0 else 0
+        return {'ticker': ticker, 'rendimiento_anual': rendimiento_anual, 'volatilidad_anual': volatilidad_anual, 'sharpe': sharpe}
+    except Exception:
+        return None
+
+
+def es_mejor(a, b):
+    """Compara dos empresas y determina cuál es mejor según Sharpe, rendimiento y volatilidad"""
+    if a is None:
+        return False
+    if b is None:
+        return True
+    if a['sharpe'] > b['sharpe']:
+        return True
+    elif a['sharpe'] == b['sharpe']:
+        if a['rendimiento_anual'] > b['rendimiento_anual']:
+            return True
+        elif a['rendimiento_anual'] == b['rendimiento_anual']:
+            return a['volatilidad_anual'] < b['volatilidad_anual']
+    return False
+
+
+def seleccion_divide_y_venceras(lista):
+    """Encuentra el mejor elemento dividiendo recursivamente la lista"""
+    n = len(lista)
+    if n == 0:
+        return None
+    if n == 1:
+        return lista[0]
+    mid = n//2
+    mejor_izq = seleccion_divide_y_venceras(lista[:mid])
+    mejor_der = seleccion_divide_y_venceras(lista[mid:])
+    return mejor_izq if es_mejor(mejor_izq, mejor_der) else mejor_der
+
+
+def seleccion_programacion_dinamica(lista):
+    """Encuentra el mejor elemento iterando secuencialmente"""
+    mejor = None
+    for elem in lista:
+        if es_mejor(elem, mejor):
+            mejor = elem
+    return mejor
+
+
+def tiempo_promedio(func, datos, repeticiones=3):
+    """Mide el tiempo promedio de ejecución de una función"""
+    total = 0
+    for _ in range(repeticiones):
+        inicio = time.perf_counter()
+        func(datos)
+        fin = time.perf_counter()
+        total += (fin - inicio)
+    return total / repeticiones
+
+
+class DVFrame(ctk.CTkFrame):
+    def __init__(self, master, parent):
+        super().__init__(master)
+        self.parent = parent
+        self.analisis_thread = None
+
+        layout = ctk.CTkFrame(self)
+        layout.pack(padx=6, pady=(8,6), fill="both", expand=True)
+        info = ctk.CTkLabel(layout, text="Mejor Empresa S&P 500 — Divide y Vencerás vs Programación Dinámica", font=ctk.CTkFont(size=16, weight="bold"))
+        info.pack(pady=(0,4))
+        self.status = ctk.CTkLabel(layout, text="Descarga un año de datos históricos de todas las empresas del S&P 500 y calcula, para cada una, su rendimiento anual, volatilidad y ratio de Sharpe. Luego compara dos algoritmos (Divide y Vencerás vs Programación Dinámica) para elegir la mejor empresa y medir cuánto tardan.", wraplength=420)
+        self.status.pack()
+
+        self.btn_run = ctk.CTkButton(layout, text="Analizar empresas", command=self._analisis_thread)
+        self.btn_run.pack(pady=4)
+        self.result = ctk.CTkTextbox(layout, height=135, width=480)
+        self.result.pack(padx=6, pady=6)
+
+        self.fig, self.ax = plt.subplots(figsize=(7, 4))
+        self.canvas = FigureCanvasTkAgg(self.fig, master=layout)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def _analisis_thread(self):
+        t = threading.Thread(target=self.run_analisis)
+        t.start()
+
+    def run_analisis(self):
+        self.status.configure(text="Descargando y procesando datos...")
+        self.btn_run.configure(state="disabled")
+        self.result.delete("1.0", tk.END)
+
+        df_empresas = self.parent.empresas_df
+
+        lista_metricas = []
+        for idx, fila in df_empresas.iterrows():
+            metricas = calcular_metricas(fila['Symbol'])
+            if metricas is not None:
+                metricas['nombre'] = fila['Name']
+                metricas['sector'] = fila['Sector']
+                lista_metricas.append(metricas)
+
+        Ns = list(range(10, len(lista_metricas) + 1, 20))
+        t_div, t_dp = [], []
+        for n in Ns:
+            sublista = lista_metricas[:n]
+            t_div.append(tiempo_promedio(seleccion_divide_y_venceras, sublista))
+            t_dp.append(tiempo_promedio(seleccion_programacion_dinamica, sublista))
+        
+        mejor_divide = seleccion_divide_y_venceras(lista_metricas)
+        mejor_dp = seleccion_programacion_dinamica(lista_metricas)
+        texto_result = (
+            f"Mejor empresa (Divide y Vencerás):\n"
+            f"{mejor_divide['nombre']} ({mejor_divide['ticker']})\n"
+            f"Sharpe: {mejor_divide['sharpe']:.4f}, Rendimiento: {mejor_divide['rendimiento_anual']*100:.2f}%, Volatilidad: {mejor_divide['volatilidad_anual']*100:.2f}%\n\n"
+            f"Mejor empresa (Programación Dinámica):\n"
+            f"{mejor_dp['nombre']} ({mejor_dp['ticker']})\n"
+            f"Sharpe: {mejor_dp['sharpe']:.4f}, Rendimiento: {mejor_dp['rendimiento_anual']*100:.2f}%, Volatilidad: {mejor_dp['volatilidad_anual']*100:.2f}%"
+        )
+        self.result.insert("end", texto_result)
+        
+        self.ax.clear()
+        self.ax.plot(Ns, t_div, label="Divide y Vencerás", marker="o")
+        self.ax.plot(Ns, t_dp, label="Prog. Dinámica", marker="s")
+        self.ax.set_xlabel("N empresas")
+        self.ax.set_ylabel("Tiempo (s)")
+        self.ax.set_title("Desempeño Divide & Vencerás vs. Prog. Dinámica")
+        self.ax.legend()
+        self.ax.grid(True, alpha=0.3)
+        self.canvas.draw()
+        self.status.configure(text="¡Análisis completo!")
+        self.btn_run.configure(state="normal")
+
+
+# ----------- MODULO AEM (ÁRBOL DE EXPANSIÓN MÍNIMA): PRIM Y KRUSKAL ----------- #
+# Este módulo construye un Árbol de Expansión Mínima usando dos algoritmos:
+# - Prim: Selecciona iterativamente la arista más corta que conecte un nodo seleccionado con uno no seleccionado
+# - Kruskal: Ordena todas las aristas y selecciona las más cortas que no formen ciclos
+# Objetivo: Visualizar clustering de empresas por sector basado en correlaciones
+
+
+def aem_prim(matriz_distancia):
+    """Implementa el algoritmo de Prim para encontrar el Árbol de Expansión Mínima"""
+    n = len(matriz_distancia)
+    if n < 2:
+        return [], 0
+    seleccionado = [False]*n
+    seleccionado[0] = True
+    aristas = []
+    costo_total = 0
+    
+    for _ in range(n-1):
+        dist_minima = np.inf
+        u, v = -1, -1
+        for i in range(n):
+            if seleccionado[i]:
+                for j in range(n):
+                    if not seleccionado[j] and matriz_distancia[i,j] < dist_minima:
+                        dist_minima = matriz_distancia[i,j]
+                        u, v = i, j
+        if u == -1 or v == -1:
+            break
+        aristas.append((u,v,dist_minima))
+        seleccionado[v] = True
+        costo_total += dist_minima
+    return aristas, costo_total
+
+
+def aem_kruskal(matriz_distancia):
+    """Implementa el algoritmo de Kruskal para encontrar el Árbol de Expansión Mínima"""
+    n = len(matriz_distancia)
+    if n < 2:
+        return [], 0
+    padre = list(range(n))
+    
+    def encontrar(i):
+        while padre[i] != i:
+            i = padre[i]
+        return i
+    
+    def unir(i,j):
+        pi, pj = encontrar(i), encontrar(j)
+        padre[pi] = pj
+    
+    lista_aristas = []
+    for i in range(n):
+        for j in range(i+1, n):
+            lista_aristas.append((matriz_distancia[i,j], i, j))
+    lista_aristas.sort()
+    
+    aristas = []
+    costo_total = 0
+    for dist, u, v in lista_aristas:
+        if encontrar(u) != encontrar(v):
+            aristas.append((u,v,dist))
+            unir(u,v)
+            costo_total += dist
+        if len(aristas) == n-1:
+            break
+    return aristas, costo_total
+
+
+def graficar_aem(aristas, tickers, sectores, nombre_algoritmo):
+    """Visualiza el Árbol de Expansión Mínima con nodos coloreados por sector"""
+    if not aristas or len(tickers) < 2:
+        print("No se pueden graficar resultados vacíos.")
+        return
+
+    mapa_sectores = {}
+    for idx, t in enumerate(tickers):
+        mapa_sectores[t] = sectores[idx] if idx < len(sectores) else 'Unknown'
+
+    etiquetas_sector = [mapa_sectores[t] for t in tickers]
+
+    G = nx.Graph()
+    for i, t in enumerate(tickers):
+        G.add_node(t, sector=etiquetas_sector[i])
+    for u, v, w in aristas:
+        G.add_edge(tickers[u], tickers[v], weight=w)
+
+    mapa_color_sector = {s: idx for idx, s in enumerate(sorted(set(etiquetas_sector)))}
+    colores_nodos = [mapa_color_sector[G.nodes[n]['sector']] for n in G.nodes]
+
+    plt.figure(figsize=(10, 8))
+    pos = nx.spring_layout(G, seed=42)
+    nx.draw(
+        G, pos,
+        with_labels=True,
+        node_color=colores_nodos,
+        cmap=plt.cm.tab20,
+        node_size=100,
+        edge_color='gray'
+    )
+
+    leyenda = {v: k for k, v in mapa_color_sector.items()}
+    handles = [
+        plt.Line2D([], [], marker="o", color=plt.cm.tab20(i),
+                   linestyle="", label=leyenda[i])
+        for i in leyenda
+    ]
+    plt.legend(handles=handles, loc='upper left', title="Sector")
+    plt.title(f"AEM ({nombre_algoritmo}) - clusters por sector")
+    plt.show()
+
+
+class AEMFrame(ctk.CTkFrame):
+    def __init__(self, master, parent):
+        super().__init__(master)
+        self.parent = parent
+
+        layout = ctk.CTkFrame(self)
+        layout.pack(padx=6, pady=(8,8), fill="both", expand=True)
+
+        label = ctk.CTkLabel(
+            layout,
+            text="Sectorización ETF - Árbol de Expansión Mínima (Prim y Kruskal)",
+            font=ctk.CTkFont(size=16, weight="bold")
+        )
+        label.pack(pady=(0,8))
+
+        self.btn_run = ctk.CTkButton(layout, text="Generar Grafo AEM", command=self.ejecutar_aem)
+        self.btn_run.pack(pady=6)
+
+        self.status = ctk.CTkLabel(layout, text="Construye un Árbol de Expansión Mínima (AEM) usando las distancias basadas en correlación entre empresas. Aplica los algoritmos de Prim y Kruskal para mostrar cómo se agrupan las compañías por sector según se mueven sus precios en el mercado.", wraplength=420)
+        self.status.pack()
+
+        # Barra de progreso específica para este módulo
+        self.barra = ctk.CTkProgressBar(layout)
+        self.barra.pack(pady=(4,8))
+        self.barra.set(0)
+
+    def ejecutar_aem(self):
+        self.status.configure(text="Iniciando cálculo del AEM, espera...")
+        self.btn_run.configure(state="disabled")
+        self.barra.set(0)
+        # Hilo en segundo plano para el trabajo pesado
+        t = threading.Thread(target=self._aem_thread, daemon=True)
+        t.start()
+
+    def _aem_thread(self):
+        try:
+            df = self.parent.empresas_df
+            tickers = list(df['Symbol'])
+            sectores = list(df['Sector'])
+
+            # Helper para actualizar barra/estado desde el hilo principal
+            def actualizar_progreso(valor, texto=None):
+                def _inner():
+                    self.barra.set(valor)
+                    if texto:
+                        self.status.configure(text=texto)
+                self.after(0, _inner)
+
+            actualizar_progreso(0.05, "Descargando precios históricos...")
+            tickers_yf = [t.replace(".", "-") for t in tickers]
+
+            precios = yf.download(
+                tickers_yf,
+                period="2y",
+                interval="1d",
+                progress=False,
+                auto_adjust=False
+            )['Close']
+
+            actualizar_progreso(0.20, "Filtrando tickers con datos válidos...")
+
+            buenos_tickers = [
+                t for t in tickers
+                if t.replace(".", "-") in precios.columns
+                and not precios[t.replace(".", "-")].dropna().empty
+            ]
+            buenos_sectores = [
+                sectores[idx] for idx, t in enumerate(tickers)
+                if t in buenos_tickers
+            ]
+
+            if len(buenos_tickers) < 2:
+                actualizar_progreso(0.0, "No hay suficientes tickers válidos (mínimo 2).")
+                self.after(0, lambda: self.btn_run.configure(state="normal"))
+                return
+
+            actualizar_progreso(0.35, "Calculando rendimientos diarios...")
+            precios_validos = precios[[t.replace(".", "-") for t in buenos_tickers]].dropna()
+            rendimientos_df = precios_validos.pct_change(fill_method=None).dropna()
+
+            if rendimientos_df.empty or len(rendimientos_df.columns) < 2 or len(rendimientos_df.index) < 2:
+                actualizar_progreso(0.0, "No se pudo calcular matriz de rendimientos suficiente.")
+                self.after(0, lambda: self.btn_run.configure(state="normal"))
+                return
+
+            actualizar_progreso(0.50, "Calculando matriz de correlaciones...")
+            matriz_corr = rendimientos_df.corr()
+            if matriz_corr.empty or len(matriz_corr.columns) < 2:
+                actualizar_progreso(0.0, "No se pudo calcular matriz de correlaciones.")
+                self.after(0, lambda: self.btn_run.configure(state="normal"))
+                return
+
+            actualizar_progreso(0.65, "Calculando matriz de distancias...")
+            matriz_dist = np.sqrt(2 * (1 - matriz_corr))
+            if matriz_dist.size == 0 or matriz_dist.shape[0] < 2:
+                actualizar_progreso(0.0, "No se pudo calcular matriz de distancias.")
+                self.after(0, lambda: self.btn_run.configure(state="normal"))
+                return
+
+            actualizar_progreso(0.80, "Ejecutando algoritmos de AEM (Prim y Kruskal)...")
+            matriz_np = matriz_dist if isinstance(matriz_dist, np.ndarray) else matriz_dist.values
+            aristas_prim, costo_prim = aem_prim(matriz_np)
+            aristas_kruskal, costo_kruskal = aem_kruskal(matriz_np)
+
+            # Guardar datos locales para pasarlos al hilo principal
+            datos_grafo = (
+                aristas_prim, aristas_kruskal,
+                buenos_tickers, buenos_sectores,
+                costo_prim, costo_kruskal
+            )
+
+            def mostrar_grafos():
+                aristas_prim_loc, aristas_kruskal_loc, bt, bs, cprim, ckrus = datos_grafo
+                self.status.configure(text="Mostrando grafos AEM...")
+                # Aquí sí estamos en el hilo principal → plt.show es seguro
+                graficar_aem(aristas_prim_loc, bt, bs, "Prim")
+                graficar_aem(aristas_kruskal_loc, bt, bs, "Kruskal")
+                self.barra.set(1.0)
+                self.status.configure(
+                    text=f"Grafo generado. Costo (Prim): {cprim:.4f}, Costo (Kruskal): {ckrus:.4f}"
+                )
+                self.btn_run.configure(state="normal")
+
+            actualizar_progreso(0.90, "Preparando visualización de los grafos...")
+            # Lanza la parte gráfica en el hilo principal
+            self.after(0, mostrar_grafos)
+
+        except Exception as e:
+            import traceback
+            print(traceback.format_exc())
+            def manejar_error():
+                self.status.configure(text=f"Error en procesamiento: {str(e)}")
+                self.barra.set(0)
+                self.btn_run.configure(state="normal")
+            self.after(0, manejar_error)
+
+
+# ----------- MODULO GREEDY (CORRELACIÓN MÍNIMA) ----------- #
+# Este módulo construye un portafolio seleccionando iterativamente la empresa
+# que MENOS correlaciona con las ya seleccionadas, maximizando la diversificación real
+# Objetivo: Portfolio de mínima correlación promedio (anti-correlación máxima)
+
+
+def greedy_correlacion_minima(rendimientos_df, tickers, sectores, n_activos=20):
+    """
+    Construye portafolio greedy seleccionando iterativamente
+    la acción con menor correlación promedio con las ya seleccionadas
+    """
+    matriz_corr = rendimientos_df.corr()
+    n_total = len(matriz_corr)
+    
+    if n_activos > n_total:
+        n_activos = n_total
+    
+    # Comienza con el primer ticker
+    seleccionados = [0]
+    restantes = set(range(1, n_total))
+    correlaciones_promedio = [0.0]  # Correlación inicial es 0
+    
+    # Selecciona iterativamente
+    for _ in range(n_activos - 1):
+        if not restantes:
+            break
+            
+        mejor_ticker = None
+        mejor_corr_prom = float('inf')
+        
+        # Para cada candidato, calcula correlación promedio con los seleccionados
+        for candidato in restantes:
+            corr_prom = np.mean([abs(matriz_corr.iloc[candidato, s]) for s in seleccionados])
+            if corr_prom < mejor_corr_prom:
+                mejor_corr_prom = corr_prom
+                mejor_ticker = candidato
+        
+        if mejor_ticker is not None:
+            seleccionados.append(mejor_ticker)
+            correlaciones_promedio.append(mejor_corr_prom)
+            restantes.remove(mejor_ticker)
+    
+    # Construye resultado
+    tickers_seleccionados = [tickers[i] for i in seleccionados]
+    sectores_seleccionados = [sectores[i] for i in seleccionados]
+    
+    # Calcula correlación promedio final del portafolio
+    corr_final = 0
+    count = 0
+    for i in range(len(seleccionados)):
+        for j in range(i+1, len(seleccionados)):
+            corr_final += abs(matriz_corr.iloc[seleccionados[i], seleccionados[j]])
+            count += 1
+    corr_final = corr_final / count if count > 0 else 0
+    
+    return {
+        'tickers': tickers_seleccionados,
+        'sectores': sectores_seleccionados,
+        'indices': seleccionados,
+        'correlacion_promedio': corr_final,
+        'correlaciones_paso': correlaciones_promedio
+    }
+
+
+class GreedyFrame(ctk.CTkFrame):
+    def __init__(self, master, parent):
+        super().__init__(master)
+        self.parent = parent
+        
+        layout = ctk.CTkFrame(self)
+        layout.pack(padx=6, pady=(8,6), fill="both", expand=True)
+        
+        info = ctk.CTkLabel(
+            layout, 
+            text="Portafolio Greedy — Correlación Mínima (Máxima Diversificación)", 
+            font=ctk.CTkFont(size=16, weight="bold")
+        )
+        info.pack(pady=(0,8))
+        
+        desc = ctk.CTkLabel(
+            layout,
+            text="“Selecciona de forma greedy un conjunto de empresas que casi no se mueven juntas. En cada paso elige la acción menos correlacionada con las ya seleccionadas, construyendo un portafolio con correlación promedio muy baja (máxima diversificación)",
+            wraplength=480,
+            font=ctk.CTkFont(size=12)
+        )
+        desc.pack(pady=(0,8))
+        
+        # Control de número de activos
+        control_frame = ctk.CTkFrame(layout)
+        control_frame.pack(pady=8)
+        
+        ctk.CTkLabel(control_frame, text="Número de activos a seleccionar:").pack(side='left', padx=(0,8))
+        self.var_n_activos = tk.IntVar(value=20)
+        ctk.CTkComboBox(
+            control_frame, 
+            values=[str(i) for i in [10, 15, 20, 25, 30, 40, 50]], 
+            variable=self.var_n_activos,
+            width=80
+        ).pack(side='left')
+        
+        self.status = ctk.CTkLabel(layout, text="Clic en Analizar para comenzar.")
+        self.status.pack(pady=4)
+        
+        self.btn_run = ctk.CTkButton(layout, text="Analizar portafolio", command=self._analisis_thread)
+        self.btn_run.pack(pady=6)
+        
+        self.result = ctk.CTkTextbox(layout, height=200, width=580)
+        self.result.pack(padx=6, pady=6)
+        
+        # Gráfico
+        self.fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(12, 4))
+        self.canvas = FigureCanvasTkAgg(self.fig, master=layout)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    def _analisis_thread(self):
+        t = threading.Thread(target=self.run_analisis)
+        t.start()
+
+    def run_analisis(self):
+        self.status.configure(text="Descargando datos y calculando correlaciones...")
+        self.btn_run.configure(state="disabled")
+        self.result.delete("1.0", tk.END)
+
+        try:
+            df_empresas = self.parent.empresas_df
+            tickers = list(df_empresas['Symbol'])
+            sectores = list(df_empresas['Sector'])
+            n_activos = int(self.var_n_activos.get())
+
+            # Descargar precios
+            self.status.configure(text="Descargando precios históricos...")
+            tickers_yf = [t.replace(".", "-") for t in tickers]
+            precios = yf.download(tickers_yf, period="2y", interval="1d", progress=False)['Close']
+
+            # Filtrar tickers válidos
+            buenos_tickers = [
+                t for t in tickers
+                if t.replace(".", "-") in precios.columns
+                and not precios[t.replace(".", "-")].dropna().empty
+            ]
+            buenos_sectores = [
+                sectores[idx] for idx, t in enumerate(tickers)
+                if t in buenos_tickers
+            ]
+
+            if len(buenos_tickers) < n_activos:
+                self.status.configure(text=f"Solo hay {len(buenos_tickers)} tickers válidos, ajustando...")
+                n_activos = len(buenos_tickers)
+
+            precios_validos = precios[[t.replace(".", "-") for t in buenos_tickers]].dropna()
+            rendimientos_df = precios_validos.pct_change(fill_method=None).dropna()
+
+            # Ejecutar algoritmo greedy
+            self.status.configure(text="Ejecutando algoritmo greedy de correlación mínima...")
+            resultado = greedy_correlacion_minima(rendimientos_df, buenos_tickers, buenos_sectores, n_activos)
+
+            # Mostrar resultados
+            texto = f"=== PORTAFOLIO GREEDY (Correlación Mínima) ===\n\n"
+            texto += f"Activos seleccionados: {len(resultado['tickers'])}\n"
+            texto += f"Correlación promedio del portafolio: {resultado['correlacion_promedio']:.4f}\n\n"
+            texto += "Empresas seleccionadas (en orden de selección):\n"
+            
+            for i, (ticker, sector) in enumerate(zip(resultado['tickers'], resultado['sectores']), 1):
+                corr_paso = resultado['correlaciones_paso'][i-1] if i-1 < len(resultado['correlaciones_paso']) else 0
+                texto += f"{i}. {ticker:6s} | {sector:30s} | Corr: {corr_paso:.4f}\n"
+            
+            self.result.insert("end", texto)
+
+            # Graficar
+            self.ax1.clear()
+            self.ax2.clear()
+
+            # Gráfico 1: Evolución de correlación
+            self.ax1.plot(range(1, len(resultado['correlaciones_paso'])+1), 
+                         resultado['correlaciones_paso'], 
+                         marker='o', linewidth=2, markersize=6)
+            self.ax1.set_xlabel("Número de activos en portafolio")
+            self.ax1.set_ylabel("Correlación promedio con portafolio")
+            self.ax1.set_title("Evolución de la Correlación (Greedy)")
+            self.ax1.grid(True, alpha=0.3)
+
+            # Gráfico 2: Distribución por sectores
+            sector_count = {}
+            for sector in resultado['sectores']:
+                sector_count[sector] = sector_count.get(sector, 0) + 1
+            
+            sectores_unicos = list(sector_count.keys())
+            conteos = list(sector_count.values())
+            
+            self.ax2.barh(sectores_unicos, conteos, color='steelblue')
+            self.ax2.set_xlabel("Número de empresas")
+            self.ax2.set_title("Distribución por Sectores")
+            self.ax2.grid(True, alpha=0.3, axis='x')
+
+            self.fig.tight_layout()
+            self.canvas.draw()
+
+            self.status.configure(text="¡Análisis completo!")
+            
+        except Exception as e:
+            import traceback
+            print(traceback.format_exc())
+            self.status.configure(text=f"Error: {str(e)}")
+            self.result.insert("end", f"Error en procesamiento: {str(e)}\n")
+        finally:
+            self.btn_run.configure(state="normal")
+
+
+# ----------- APP PRINCIPAL: MENÚ LATERAL DASHBOARD ----------- #
+# Aplicación principal con menú lateral para navegar entre módulos
+
+
+class ETFToolApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("Herramienta ETF - Analisis de Algortimos")
+        self.geometry("1200x700")
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
+        self.empresas_df = None
+
+        # MENÚ LATERAL
+        self.menu = ctk.CTkFrame(self, width=210, corner_radius=0)
+        self.menu.pack(side='left', fill='y')
+        ctk.CTkLabel(self.menu, text="Herramienta ETF", font=ctk.CTkFont(size=19, weight="bold")).pack(pady=(18,10))
+        ctk.CTkButton(self.menu, text="Cargar CSV S&P500", command=self.cargar_csv).pack(pady=(4,10), fill="x")
+        
+        self.btns = []
+        for idx, (name, callback) in enumerate([
+            ("Fuerza Bruta (Portafolio)", self.show_fuerzabruta),
+            ("Mejor Empresa (DV || DP)", self.show_dv),
+            ("Prim/Kruskal AEM", self.show_aem),
+            ("Greedy Correlación Mín.", self.show_greedy)
+        ]):
+            btn = ctk.CTkButton(self.menu, text=name, command=callback)
+            btn.pack(pady=(8 if idx==0 else 2, 10), fill="x")
+            self.btns.append(btn)
+        
+        self.status = ctk.CTkLabel(self.menu, text="Carga o selecciona un módulo.")
+        self.status.pack(pady=(14,6))
+
+        # MARCO PRINCIPAL
+        self.container = ctk.CTkFrame(self)
+        self.container.pack(side='right', fill='both', expand=True, padx=0, pady=0)
+        self.panel_actual = None
+        self.show_fuerzabruta()
+
+    def cargar_csv(self):
+        filepath = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
+        if not filepath:
+            return
+        try:
+            df = pd.read_csv(filepath)
+            self.empresas_df = df[['Symbol', 'Name', 'Sector']]
+            self.status.configure(text="Archivo cargado y listo.")
+        except Exception:
+            messagebox.showerror("Error", "No se pudo leer el archivo. Revisa formato.")
+
+    def show_fuerzabruta(self):
+        self._nuevo_panel(FuerzaBrutaFrame(self.container))
+
+    def show_dv(self):
+        if self.empresas_df is None:
+            self.status.configure(text="Carga primero el CSV.")
+            return
+        self._nuevo_panel(DVFrame(self.container, self))
+
+    def show_aem(self):
+        if self.empresas_df is None:
+            self.status.configure(text="Carga primero el CSV.")
+            return
+        self._nuevo_panel(AEMFrame(self.container, self))
+
+    def show_greedy(self):
+        if self.empresas_df is None:
+            self.status.configure(text="Carga primero el CSV.")
+            return
+        self._nuevo_panel(GreedyFrame(self.container, self))
+
+    def _nuevo_panel(self, frame):
+        if self.panel_actual:
+            self.panel_actual.destroy()
+        self.panel_actual = frame
+        self.panel_actual.pack(fill='both', expand=True)
+
+
+if __name__ == "__main__":
+    ETFToolApp().mainloop()
