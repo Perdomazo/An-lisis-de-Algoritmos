@@ -10,8 +10,6 @@ import networkx as nx
 import threading
 import time
 
-
-# ----------- UTILIDADES GENERALES ----------- #
 # Funciones auxiliares para descargar precios y calcular rendimientos
 
 
@@ -121,7 +119,7 @@ class FuerzaBrutaFrame(ctk.CTkFrame):
                 mejor_r = r_port
                 mejor_sigma = sigma_port
 
-        # Combinaciones de fuerza bruta
+        # Combinaciones 
         if activos == 1:
             for a in range(total_unidades + 1):
                 if a == total_unidades:
@@ -444,8 +442,6 @@ class AEMFrame(ctk.CTkFrame):
 
         self.status = ctk.CTkLabel(layout, text="Construye un Árbol de Expansión Mínima (AEM) usando las distancias basadas en correlación entre empresas. Aplica los algoritmos de Prim y Kruskal para mostrar cómo se agrupan las compañías por sector según se mueven sus precios en el mercado.", wraplength=420)
         self.status.pack()
-
-        # Barra de progreso específica para este módulo
         self.barra = ctk.CTkProgressBar(layout)
         self.barra.pack(pady=(4,8))
         self.barra.set(0)
@@ -454,7 +450,6 @@ class AEMFrame(ctk.CTkFrame):
         self.status.configure(text="Iniciando cálculo del AEM, espera...")
         self.btn_run.configure(state="disabled")
         self.barra.set(0)
-        # Hilo en segundo plano para el trabajo pesado
         t = threading.Thread(target=self._aem_thread, daemon=True)
         t.start()
 
@@ -463,8 +458,6 @@ class AEMFrame(ctk.CTkFrame):
             df = self.parent.empresas_df
             tickers = list(df['Symbol'])
             sectores = list(df['Sector'])
-
-            # Helper para actualizar barra/estado desde el hilo principal
             def actualizar_progreso(valor, texto=None):
                 def _inner():
                     self.barra.set(valor)
@@ -527,8 +520,6 @@ class AEMFrame(ctk.CTkFrame):
             matriz_np = matriz_dist if isinstance(matriz_dist, np.ndarray) else matriz_dist.values
             aristas_prim, costo_prim = aem_prim(matriz_np)
             aristas_kruskal, costo_kruskal = aem_kruskal(matriz_np)
-
-            # Guardar datos locales para pasarlos al hilo principal
             datos_grafo = (
                 aristas_prim, aristas_kruskal,
                 buenos_tickers, buenos_sectores,
@@ -538,7 +529,6 @@ class AEMFrame(ctk.CTkFrame):
             def mostrar_grafos():
                 aristas_prim_loc, aristas_kruskal_loc, bt, bs, cprim, ckrus = datos_grafo
                 self.status.configure(text="Mostrando grafos AEM...")
-                # Aquí sí estamos en el hilo principal → plt.show es seguro
                 graficar_aem(aristas_prim_loc, bt, bs, "Prim")
                 graficar_aem(aristas_kruskal_loc, bt, bs, "Kruskal")
                 self.barra.set(1.0)
@@ -548,7 +538,6 @@ class AEMFrame(ctk.CTkFrame):
                 self.btn_run.configure(state="normal")
 
             actualizar_progreso(0.90, "Preparando visualización de los grafos...")
-            # Lanza la parte gráfica en el hilo principal
             self.after(0, mostrar_grafos)
 
         except Exception as e:
@@ -577,21 +566,18 @@ def greedy_correlacion_minima(rendimientos_df, tickers, sectores, n_activos=20):
     
     if n_activos > n_total:
         n_activos = n_total
-    
-    # Comienza con el primer ticker
+
     seleccionados = [0]
     restantes = set(range(1, n_total))
-    correlaciones_promedio = [0.0]  # Correlación inicial es 0
-    
-    # Selecciona iterativamente
+    correlaciones_promedio = [0.0]  #inicia en 0
+
     for _ in range(n_activos - 1):
         if not restantes:
             break
             
         mejor_ticker = None
         mejor_corr_prom = float('inf')
-        
-        # Para cada candidato, calcula correlación promedio con los seleccionados
+
         for candidato in restantes:
             corr_prom = np.mean([abs(matriz_corr.iloc[candidato, s]) for s in seleccionados])
             if corr_prom < mejor_corr_prom:
@@ -602,12 +588,11 @@ def greedy_correlacion_minima(rendimientos_df, tickers, sectores, n_activos=20):
             seleccionados.append(mejor_ticker)
             correlaciones_promedio.append(mejor_corr_prom)
             restantes.remove(mejor_ticker)
-    
-    # Construye resultado
+
     tickers_seleccionados = [tickers[i] for i in seleccionados]
     sectores_seleccionados = [sectores[i] for i in seleccionados]
     
-    # Calcula correlación promedio final del portafolio
+    # correlacion promedio
     corr_final = 0
     count = 0
     for i in range(len(seleccionados)):
@@ -648,7 +633,7 @@ class GreedyFrame(ctk.CTkFrame):
         )
         desc.pack(pady=(0,8))
         
-        # Control de número de activos
+        # Control de n de activos
         control_frame = ctk.CTkFrame(layout)
         control_frame.pack(pady=8)
         
@@ -670,7 +655,7 @@ class GreedyFrame(ctk.CTkFrame):
         self.result = ctk.CTkTextbox(layout, height=200, width=580)
         self.result.pack(padx=6, pady=6)
         
-        # Gráfico
+        # Grafico
         self.fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(12, 4))
         self.canvas = FigureCanvasTkAgg(self.fig, master=layout)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
@@ -732,8 +717,6 @@ class GreedyFrame(ctk.CTkFrame):
             # Graficar
             self.ax1.clear()
             self.ax2.clear()
-
-            # Gráfico 1: Evolución de correlación
             self.ax1.plot(range(1, len(resultado['correlaciones_paso'])+1), 
                          resultado['correlaciones_paso'], 
                          marker='o', linewidth=2, markersize=6)
@@ -741,8 +724,6 @@ class GreedyFrame(ctk.CTkFrame):
             self.ax1.set_ylabel("Correlación promedio con portafolio")
             self.ax1.set_title("Evolución de la Correlación (Greedy)")
             self.ax1.grid(True, alpha=0.3)
-
-            # Gráfico 2: Distribución por sectores
             sector_count = {}
             for sector in resultado['sectores']:
                 sector_count[sector] = sector_count.get(sector, 0) + 1
@@ -769,7 +750,6 @@ class GreedyFrame(ctk.CTkFrame):
             self.btn_run.configure(state="normal")
 
 
-# ----------- APP PRINCIPAL: MENÚ LATERAL DASHBOARD ----------- #
 # Aplicación principal con menú lateral para navegar entre módulos
 
 
@@ -782,7 +762,6 @@ class ETFToolApp(ctk.CTk):
         ctk.set_default_color_theme("blue")
         self.empresas_df = None
 
-        # MENÚ LATERAL
         self.menu = ctk.CTkFrame(self, width=210, corner_radius=0)
         self.menu.pack(side='left', fill='y')
         ctk.CTkLabel(self.menu, text="Herramienta ETF", font=ctk.CTkFont(size=19, weight="bold")).pack(pady=(18,10))
@@ -802,7 +781,6 @@ class ETFToolApp(ctk.CTk):
         self.status = ctk.CTkLabel(self.menu, text="Carga o selecciona un módulo.")
         self.status.pack(pady=(14,6))
 
-        # MARCO PRINCIPAL
         self.container = ctk.CTkFrame(self)
         self.container.pack(side='right', fill='both', expand=True, padx=0, pady=0)
         self.panel_actual = None
